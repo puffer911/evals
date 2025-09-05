@@ -1,8 +1,9 @@
 """
-Uniswap Universal Router Swapper - Core functionality
+Uniswap Universal Router Swapper - Core functionality for Base Network V4
 """
 
 import os
+import traceback
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 import time
 from abis import ERC20_ABI
 from uniswap_universal_router_decoder import RouterCodec
+import eth_abi
 
 load_dotenv()
 
@@ -51,44 +53,133 @@ class UniversalRouterSwapper:
             contract = self.w3.eth.contract(address=token_address, abi=ERC20_ABI)
             return contract.functions.balanceOf(self.account.address).call()
 
-    def check_allowance(self, token_address, spender_address):
-        contract = self.w3.eth.contract(address=token_address, abi=ERC20_ABI)
-        return contract.functions.allowance(self.account.address, spender_address).call()
+    def swap_eth_to_usdc(self, eth_amount_wei):
+        """
+        Swap ETH to USDC using Uniswap Universal Router V4
+        
+        :param eth_amount_wei: Amount of ETH to swap (in wei)
+        """
+        # Validate ETH balance
+        if self.get_balance() < eth_amount_wei:
+            raise ValueError("Insufficient ETH balance")
 
-    def approve_token(self, token_address, spender_address, amount):
-        contract = self.w3.eth.contract(address=token_address, abi=ERC20_ABI)
-        tx = contract.functions.approve(spender_address, amount).build_transaction({
+        # Build pool key bytes from returned dict (RouterCodec.encode.v4_pool_key returns a dict)
+        pool_key_dict = self.router_codec.encode.v4_pool_key(
+            '0x0000000000000000000000000000000000000000',  # Native ETH
+            self.usdc_address,
+            500,  # 0.05% fee
+            10,   # tick spacing
+            '0x0000000000000000000000000000000000000000'  # no hooks
+        )
+
+        # ABI-encode the pool key tuple: (address,address,uint24,int24,address)
+        pool_key_bytes = eth_abi.encode.encode_abi(
+            ['address', 'address', 'uint24', 'int24', 'address'],
+            [
+                self.w3.to_checksum_address(pool_key_dict['currency_0']),
+                self.w3.to_checksum_address(pool_key_dict['currency_1']),
+                int(pool_key_dict['fee']),
+                int(pool_key_dict['tick_spacing']),
+                self.w3.to_checksum_address(pool_key_dict['hooks'])
+            ]
+        )
+
+        # Build calldata bytes for V4_SWAP_EXACT_IN
+        amount_in = eth_amount_wei.to_bytes(32, 'big')
+        amount_out_min = (0).to_bytes(32, 'big')
+        recipient = bytes.fromhex(self.account.address[2:])
+        unwrap = b'\x00'  # false
+
+        calldata_bytes = b'\x00' + pool_key_bytes + amount_in + amount_out_min + recipient + unwrap
+        calldata = self.w3.to_hex(calldata_bytes)
+
+        # Send transaction to Universal Router
+        tx = {
+            'to': self.universal_router_address,
+            'from': self.account.address,
+            'data': calldata,
+            'value': eth_amount_wei,
+            'nonce': self.w3.eth.get_transaction_count(self.account.address),
+            'gas': 300000,
+            'gasPrice': self.w3.eth.gas_price
+        }
+
+        signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return tx_hash
+
+    def swap_usdc_to_eth(self, usdc_amount):
+        """
+        Swap USDC to ETH using Uniswap Universal Router V4
+        
+        :param usdc_amount: Amount of USDC to swap (in smallest units)
+        """
+        # Validate USDC balance
+        usdc_balance = self.get_balance(self.usdc_address)
+        if usdc_balance < usdc_amount:
+            raise ValueError("Insufficient USDC balance")
+
+        # Approve Universal Router to spend USDC
+        usdc_contract = self.w3.eth.contract(address=self.usdc_address, abi=ERC20_ABI)
+        approve_tx = usdc_contract.functions.approve(self.universal_router_address, usdc_amount).build_transaction({
             'from': self.account.address,
             'nonce': self.w3.eth.get_transaction_count(self.account.address),
             'gas': 100000,
             'gasPrice': self.w3.eth.gas_price
         })
-        signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        return tx_hash
+        signed_approve_tx = self.w3.eth.account.sign_transaction(approve_tx, self.account.key)
+        approve_tx_hash = self.w3.eth.send_raw_transaction(signed_approve_tx.raw_transaction)
+        
+        # Wait for approval transaction
+        self.w3.eth.wait_for_transaction_receipt(approve_tx_hash)
 
-    def send_calldata_transaction(self, calldata_hex, value=0, gas=800000):
-        if not calldata_hex:
-            raise ValueError("Calldata is required")
+        # Build pool key bytes from returned dict (RouterCodec.encode.v4_pool_key returns a dict)
+        pool_key_dict = self.router_codec.encode.v4_pool_key(
+            self.usdc_address,
+            '0x0000000000000000000000000000000000000000',  # Native ETH
+            500,  # 0.05% fee
+            10,   # tick spacing
+            '0x0000000000000000000000000000000000000000'  # no hooks
+        )
 
-        if not calldata_hex.startswith('0x'):
-            calldata_hex = '0x' + calldata_hex
+        # ABI-encode the pool key tuple: (address,address,uint24,int24,address)
+        pool_key_bytes = eth_abi.encode.encode_abi(
+            ['address', 'address', 'uint24', 'int24', 'address'],
+            [
+                self.w3.to_checksum_address(pool_key_dict['currency_0']),
+                self.w3.to_checksum_address(pool_key_dict['currency_1']),
+                int(pool_key_dict['fee']),
+                int(pool_key_dict['tick_spacing']),
+                self.w3.to_checksum_address(pool_key_dict['hooks'])
+            ]
+        )
 
+        # Build calldata bytes for V4_SWAP_EXACT_IN
+        amount_in = usdc_amount.to_bytes(32, 'big')
+        amount_out_min = (0).to_bytes(32, 'big')
+        recipient = bytes.fromhex(self.account.address[2:])
+        unwrap = b'\x01'  # true
+
+        calldata_bytes = b'\x00' + pool_key_bytes + amount_in + amount_out_min + recipient + unwrap
+        calldata = self.w3.to_hex(calldata_bytes)
+
+        # Send swap transaction
         tx = {
             'to': self.universal_router_address,
             'from': self.account.address,
-            'data': calldata_hex,
-            'value': int(value) if value else 0,
+            'data': calldata,
+            'value': 0,
             'nonce': self.w3.eth.get_transaction_count(self.account.address),
-            'gas': gas,
+            'gas': 300000,
             'gasPrice': self.w3.eth.gas_price
         }
 
         signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
         return tx_hash
 
     def wait_for_transaction(self, tx_hash, timeout=300):
+        """Wait for transaction confirmation"""
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
@@ -103,7 +194,7 @@ class UniversalRouterSwapper:
 def interactive_swap(swapper):
     while True:
         print("\n" + "="*50)
-        print("UNIVERSAL ROUTER SWAPPER")
+        print("UNISWAP UNIVERSAL ROUTER V4 - BASE NETWORK")
         print("="*50)
         print("1. Display Balances")
         print("2. Swap ETH to USDC")
@@ -121,32 +212,33 @@ def interactive_swap(swapper):
 
             elif choice == "2":
                 try:
-                    calldata = input("Enter ETH to USDC calldata: ").strip()
-                    eth_amount = float(input("Enter ETH amount to send: ").strip())
+                    amount_str = input("Enter ETH amount to swap: ").strip()
+                    eth_amount = float(amount_str)
                     eth_amount_wei = swapper.w3.to_wei(eth_amount, 'ether')
 
-                    tx_hash = swapper.send_calldata_transaction(calldata, value=eth_amount_wei)
+                    tx_hash = swapper.swap_eth_to_usdc(eth_amount_wei)
+                    print("⏳ Waiting for transaction confirmation...")
                     receipt = swapper.wait_for_transaction(tx_hash)
                     print(f"✅ Swap completed! Transaction: {receipt.transactionHash.hex()}")
 
                 except ValueError as e:
                     print(f"❌ Error: {str(e)}")
+                    traceback.print_exc()
 
             elif choice == "3":
                 try:
-                    calldata = input("Enter USDC to ETH calldata: ").strip()
-                    usdc_amount = float(input("Enter USDC amount to spend: ").strip())
+                    amount_str = input("Enter USDC amount to swap: ").strip()
+                    usdc_amount = float(amount_str)
                     usdc_amount_int = int(usdc_amount * 10**6)
 
-                    # Approve USDC spending
-                    swapper.approve_token(swapper.usdc_address, swapper.universal_router_address, usdc_amount_int)
-
-                    tx_hash = swapper.send_calldata_transaction(calldata)
+                    tx_hash = swapper.swap_usdc_to_eth(usdc_amount_int)
+                    print("⏳ Waiting for transaction confirmation...")
                     receipt = swapper.wait_for_transaction(tx_hash)
                     print(f"✅ Swap completed! Transaction: {receipt.transactionHash.hex()}")
 
                 except ValueError as e:
                     print(f"❌ Error: {str(e)}")
+                    traceback.print_exc()
 
             elif choice == "4":
                 print("\n👋 Goodbye!")
@@ -160,4 +252,5 @@ def interactive_swap(swapper):
             break
         except Exception as e:
             print(f"❌ Error: {str(e)}")
+            traceback.print_exc()
             input("\nPress Enter to continue...")
