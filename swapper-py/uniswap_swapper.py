@@ -43,7 +43,8 @@ class UniversalRouterSwapper:
             raise ValueError("USDC_ADDRESS not found in environment variables")
         self.usdc_address = self.w3.to_checksum_address(usdc_raw)
 
-        self.router_codec = RouterCodec()
+        # Provide our Web3 instance to RouterCodec so builder can query chain/nonce/etc.
+        self.router_codec = RouterCodec(self.w3)
 
     def get_balance(self, token_address=None):
         if token_address is None:
@@ -84,7 +85,18 @@ class UniversalRouterSwapper:
         builder.take_all(self.usdc_address, 0)
         # finalize builder and produce transaction dict targeting the Universal Router
         v4_swap = builder.build_v4_swap()
-        trx = v4_swap.build_transaction(self.account.address, eth_amount_wei, ur_address=self.universal_router_address)
+        try:
+            # Provide a conservative gas_limit to avoid RPC estimate_gas (which can revert during simulation)
+            trx = v4_swap.build_transaction(
+                self.account.address,
+                eth_amount_wei,
+                ur_address=self.universal_router_address,
+                gas_limit=500000
+            )
+        except Exception as e:
+            print("❌ Error building transaction (did RPC simulation revert?):", str(e))
+            traceback.print_exc()
+            raise
 
         # Sign and broadcast
         signed = self.w3.eth.account.sign_transaction(trx, self.account.key)
@@ -137,7 +149,18 @@ class UniversalRouterSwapper:
 
         # finalize builder and produce transaction dict targeting the Universal Router
         v4_swap = builder.build_v4_swap()
-        trx = v4_swap.build_transaction(self.account.address, 0, ur_address=self.universal_router_address)
+        try:
+            # Provide a conservative gas_limit to avoid RPC estimate_gas (which can revert during simulation)
+            trx = v4_swap.build_transaction(
+                self.account.address,
+                0,
+                ur_address=self.universal_router_address,
+                gas_limit=500000
+            )
+        except Exception as e:
+            print("❌ Error building transaction (did RPC simulation revert?):", str(e))
+            traceback.print_exc()
+            raise
 
         # Sign and broadcast
         signed = self.w3.eth.account.sign_transaction(trx, self.account.key)
