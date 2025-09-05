@@ -37,13 +37,15 @@ class UniswapV4Swapper:
         print(f"Connected to wallet: {self.account.address}")
 
         # Contract addresses (no defaults - must be set in .env)
-        self.pool_manager_address = os.getenv('POOL_MANAGER_ADDRESS')
-        if not self.pool_manager_address:
+        pool_manager_raw = os.getenv('POOL_MANAGER_ADDRESS')
+        if not pool_manager_raw:
             raise ValueError("POOL_MANAGER_ADDRESS not found in environment variables")
+        self.pool_manager_address = self.w3.to_checksum_address(pool_manager_raw)
 
-        self.usdc_address = os.getenv('USDC_ADDRESS')
-        if not self.usdc_address:
+        usdc_raw = os.getenv('USDC_ADDRESS')
+        if not usdc_raw:
             raise ValueError("USDC_ADDRESS not found in environment variables")
+        self.usdc_address = self.w3.to_checksum_address(usdc_raw)
 
         # Initialize contracts
         self.pool_manager = self.w3.eth.contract(

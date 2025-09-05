@@ -25,8 +25,32 @@ cp .env.example .env
 3. Configure your environment variables (all REQUIRED):
 - `RPC_URL`: Your Ethereum RPC endpoint (Infura, Alchemy, etc.)
 - `PRIVATE_KEY`: Your wallet's private key (NEVER commit this!)
-- `POOL_MANAGER_ADDRESS`: Uniswap V4 PoolManager contract (0x000000000004444c5dc75cB358380D2e3dE08A90)
-- `USDC_ADDRESS`: USDC contract address (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
+- `POOL_MANAGER_ADDRESS`: Uniswap V4 PoolManager contract (**must be checksummed!**)
+- `USDC_ADDRESS`: USDC contract address (**must be checksummed!**)
+
+## ⚠️ **Important: Checksummed Addresses Required**
+
+**All contract addresses must be checksummed** (proper casing) to work with web3.py:
+
+### **To checksum an address:**
+```python
+from web3 import Web3
+w3 = Web3()
+checksummed = w3.to_checksum_address("0x498581ff718922c3f8e6a244956af099b2652b2b")
+print(checksummed)  # 0x498581fF718922c3f8e6A244956AF099B2652b2b
+```
+
+### **Network-Specific Addresses:**
+
+**Base Network:**
+- PoolManager: `0x498581fF718922c3f8e6A244956AF099B2652b2b`
+- USDC: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
+- RPC: `https://mainnet.base.org`
+
+**Ethereum Mainnet:**
+- PoolManager: `0x000000000004444c5dC75cB358380D2e3dE08A90`
+- USDC: `0xA0b86a33E6441e88C5F2712C3E9b74F5F0e3f0a8`
+- RPC: `https://mainnet.infura.io/v3/YOUR_PROJECT_ID`
 
 ## Contract Address Explanation
 
