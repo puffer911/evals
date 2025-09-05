@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 import time
 from abis import ERC20_ABI
 from uniswap_universal_router_decoder import RouterCodec
-import eth_abi
 
 load_dotenv()
 
@@ -55,7 +54,7 @@ class UniversalRouterSwapper:
 
     def swap_eth_to_usdc(self, eth_amount_wei):
         """
-        Swap ETH to USDC using Uniswap Universal Router V4
+        Swap ETH to USDC using Uniswap Universal Router V4 builder (v4_swap -> swap_exact_in_single)
         
         :param eth_amount_wei: Amount of ETH to swap (in wei)
         """
@@ -63,54 +62,38 @@ class UniversalRouterSwapper:
         if self.get_balance() < eth_amount_wei:
             raise ValueError("Insufficient ETH balance")
 
-        # Build pool key bytes from returned dict (RouterCodec.encode.v4_pool_key returns a dict)
-        pool_key_dict = self.router_codec.encode.v4_pool_key(
-            '0x0000000000000000000000000000000000000000',  # Native ETH
+        # Build pool key dict using RouterCodec helper
+        pool_key = self.router_codec.encode.v4_pool_key(
+            '0x0000000000000000000000000000000000000000',  # native ETH
             self.usdc_address,
-            500,  # 0.05% fee
+            500,  # fee (0.05%)
             10,   # tick spacing
-            '0x0000000000000000000000000000000000000000'  # no hooks
+            '0x0000000000000000000000000000000000000000'  # hooks
         )
 
-        # ABI-encode the pool key tuple: (address,address,uint24,int24,address)
-        pool_key_bytes = eth_abi.encode.encode_abi(
-            ['address', 'address', 'uint24', 'int24', 'address'],
-            [
-                self.w3.to_checksum_address(pool_key_dict['currency_0']),
-                self.w3.to_checksum_address(pool_key_dict['currency_1']),
-                int(pool_key_dict['fee']),
-                int(pool_key_dict['tick_spacing']),
-                self.w3.to_checksum_address(pool_key_dict['hooks'])
-            ]
+        # Use the builder API to construct a v4 swap transaction (exact in single)
+        builder = self.router_codec.encode.chain().v4_swap()
+        # swap_exact_in_single args: pool_key, zero_for_one, amount_in, amount_out_min
+        builder.swap_exact_in_single(
+            pool_key=pool_key,
+            zero_for_one=True,            # ETH -> token: zero_for_one = True
+            amount_in=eth_amount_wei,
+            amount_out_min=0
         )
+        # take_all to collect output token (USDC)
+        builder.take_all(self.usdc_address, 0)
+        # finalize builder and produce transaction dict targeting the Universal Router
+        v4_swap = builder.build_v4_swap()
+        trx = v4_swap.build_transaction(self.account.address, eth_amount_wei, ur_address=self.universal_router_address)
 
-        # Build calldata bytes for V4_SWAP_EXACT_IN
-        amount_in = eth_amount_wei.to_bytes(32, 'big')
-        amount_out_min = (0).to_bytes(32, 'big')
-        recipient = bytes.fromhex(self.account.address[2:])
-        unwrap = b'\x00'  # false
-
-        calldata_bytes = b'\x00' + pool_key_bytes + amount_in + amount_out_min + recipient + unwrap
-        calldata = self.w3.to_hex(calldata_bytes)
-
-        # Send transaction to Universal Router
-        tx = {
-            'to': self.universal_router_address,
-            'from': self.account.address,
-            'data': calldata,
-            'value': eth_amount_wei,
-            'nonce': self.w3.eth.get_transaction_count(self.account.address),
-            'gas': 300000,
-            'gasPrice': self.w3.eth.gas_price
-        }
-
-        signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        # Sign and broadcast
+        signed = self.w3.eth.account.sign_transaction(trx, self.account.key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         return tx_hash
 
     def swap_usdc_to_eth(self, usdc_amount):
         """
-        Swap USDC to ETH using Uniswap Universal Router V4
+        Swap USDC to ETH using Universal Router V4 builder (v4_swap -> swap_exact_in_single)
         
         :param usdc_amount: Amount of USDC to swap (in smallest units)
         """
@@ -129,53 +112,36 @@ class UniversalRouterSwapper:
         })
         signed_approve_tx = self.w3.eth.account.sign_transaction(approve_tx, self.account.key)
         approve_tx_hash = self.w3.eth.send_raw_transaction(signed_approve_tx.raw_transaction)
-        
-        # Wait for approval transaction
         self.w3.eth.wait_for_transaction_receipt(approve_tx_hash)
 
-        # Build pool key bytes from returned dict (RouterCodec.encode.v4_pool_key returns a dict)
-        pool_key_dict = self.router_codec.encode.v4_pool_key(
+        # Build pool key dict using RouterCodec helper
+        pool_key = self.router_codec.encode.v4_pool_key(
             self.usdc_address,
-            '0x0000000000000000000000000000000000000000',  # Native ETH
-            500,  # 0.05% fee
+            '0x0000000000000000000000000000000000000000',  # native ETH
+            500,  # fee (0.05%)
             10,   # tick spacing
-            '0x0000000000000000000000000000000000000000'  # no hooks
+            '0x0000000000000000000000000000000000000000'  # hooks
         )
 
-        # ABI-encode the pool key tuple: (address,address,uint24,int24,address)
-        pool_key_bytes = eth_abi.encode.encode_abi(
-            ['address', 'address', 'uint24', 'int24', 'address'],
-            [
-                self.w3.to_checksum_address(pool_key_dict['currency_0']),
-                self.w3.to_checksum_address(pool_key_dict['currency_1']),
-                int(pool_key_dict['fee']),
-                int(pool_key_dict['tick_spacing']),
-                self.w3.to_checksum_address(pool_key_dict['hooks'])
-            ]
+        # Use the builder API to construct a v4 swap transaction (exact in single)
+        builder = self.router_codec.encode.chain().v4_swap()
+        # swap_exact_in_single args: pool_key, zero_for_one, amount_in, amount_out_min
+        builder.swap_exact_in_single(
+            pool_key=pool_key,
+            zero_for_one=False,
+            amount_in=usdc_amount,
+            amount_out_min=0
         )
+        # settle_all to send native ETH to recipient (address zero denotes native)
+        builder.settle_all('0x0000000000000000000000000000000000000000', 0)
 
-        # Build calldata bytes for V4_SWAP_EXACT_IN
-        amount_in = usdc_amount.to_bytes(32, 'big')
-        amount_out_min = (0).to_bytes(32, 'big')
-        recipient = bytes.fromhex(self.account.address[2:])
-        unwrap = b'\x01'  # true
+        # finalize builder and produce transaction dict targeting the Universal Router
+        v4_swap = builder.build_v4_swap()
+        trx = v4_swap.build_transaction(self.account.address, 0, ur_address=self.universal_router_address)
 
-        calldata_bytes = b'\x00' + pool_key_bytes + amount_in + amount_out_min + recipient + unwrap
-        calldata = self.w3.to_hex(calldata_bytes)
-
-        # Send swap transaction
-        tx = {
-            'to': self.universal_router_address,
-            'from': self.account.address,
-            'data': calldata,
-            'value': 0,
-            'nonce': self.w3.eth.get_transaction_count(self.account.address),
-            'gas': 300000,
-            'gasPrice': self.w3.eth.gas_price
-        }
-
-        signed_tx = self.w3.eth.account.sign_transaction(tx, self.account.key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        # Sign and broadcast
+        signed = self.w3.eth.account.sign_transaction(trx, self.account.key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         return tx_hash
 
     def wait_for_transaction(self, tx_hash, timeout=300):
