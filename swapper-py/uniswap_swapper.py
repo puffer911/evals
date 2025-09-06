@@ -59,9 +59,11 @@ class UniversalRouterSwapper:
         
         :param eth_amount_wei: Amount of ETH to swap (in wei)
         """
-        # Validate ETH balance
-        if self.get_balance() < eth_amount_wei:
-            raise ValueError("Insufficient ETH balance")
+        # Validate ETH balance with smaller gas buffer
+        balance = self.get_balance()
+        gas_buffer = self.w3.to_wei(0.0005, 'ether')  # Reduced from 0.01
+        if balance < eth_amount_wei + gas_buffer:
+            raise ValueError(f"Insufficient ETH balance. Need: {self.w3.from_wei(eth_amount_wei + gas_buffer, 'ether')} ETH, Have: {self.w3.from_wei(balance, 'ether')} ETH")
 
         # Build pool key dict using RouterCodec helper
         pool_key = self.router_codec.encode.v4_pool_key(
@@ -74,19 +76,17 @@ class UniversalRouterSwapper:
 
         # Use the builder API to construct a v4 swap transaction (exact in single)
         builder = self.router_codec.encode.chain().v4_swap()
-        # swap_exact_in_single args: pool_key, zero_for_one, amount_in, amount_out_min
         builder.swap_exact_in_single(
             pool_key=pool_key,
-            zero_for_one=True,            # ETH -> token: zero_for_one = True
+            zero_for_one=True,
             amount_in=eth_amount_wei,
-            amount_out_min=0
+            amount_out_min=int(eth_amount_wei * 0.95)  # 5% slippage tolerance (rough estimate)
         )
-        # take_all to collect output token (USDC)
         builder.take_all(self.usdc_address, 0)
-        # finalize builder and produce transaction dict targeting the Universal Router
+        
         v4_swap = builder.build_v4_swap()
+        
         try:
-            # Provide a conservative gas_limit to avoid RPC estimate_gas (which can revert during simulation)
             trx = v4_swap.build_transaction(
                 self.account.address,
                 eth_amount_wei,
@@ -94,7 +94,7 @@ class UniversalRouterSwapper:
                 gas_limit=500000
             )
         except Exception as e:
-            print("❌ Error building transaction (did RPC simulation revert?):", str(e))
+            print("❌ Error building transaction:", str(e))
             traceback.print_exc()
             raise
 
