@@ -54,54 +54,79 @@ class UniversalRouterSwapper:
             return contract.functions.balanceOf(self.account.address).call()
 
     def swap_eth_to_usdc(self, eth_amount_wei):
-        """
-        Swap ETH to USDC using Uniswap Universal Router V4 builder (v4_swap -> swap_exact_in_single)
+        print(f"🔍 Network: Base ({self.w3.eth.chain_id})")
+        print(f"🔍 Amount: {self.w3.from_wei(eth_amount_wei, 'ether')} ETH")
         
-        :param eth_amount_wei: Amount of ETH to swap (in wei)
-        """
-        # Validate ETH balance with smaller gas buffer
+        # Validate balance
         balance = self.get_balance()
-        gas_buffer = self.w3.to_wei(0.0005, 'ether')  # Reduced from 0.01
+        gas_buffer = self.w3.to_wei(0.0003, 'ether')
         if balance < eth_amount_wei + gas_buffer:
-            raise ValueError(f"Insufficient ETH balance. Need: {self.w3.from_wei(eth_amount_wei + gas_buffer, 'ether')} ETH, Have: {self.w3.from_wei(balance, 'ether')} ETH")
+            raise ValueError(f"Insufficient ETH balance")
 
-        # Build pool key dict using RouterCodec helper
+        # Use the exact pool parameters from the screenshot
         pool_key = self.router_codec.encode.v4_pool_key(
-            '0x0000000000000000000000000000000000000000',  # native ETH
-            self.usdc_address,
-            500,  # fee (0.05%)
-            10,   # tick spacing
-            '0x0000000000000000000000000000000000000000'  # hooks
+            '0x0000000000000000000000000000000000000000',  # ETH (native)
+            self.usdc_address,  # 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+            500,   # 0.05% fee (confirmed from screenshot)
+            10,    # tick spacing (standard for 0.05%)
+            '0x0000000000000000000000000000000000000000'  # no hooks
         )
-
-        # Use the builder API to construct a v4 swap transaction (exact in single)
+        
+        # Calculate reasonable minimum output
+        # From pool: ~84.87 ETH / 394.6K USDC = ~4650 USDC per ETH
+        eth_amount_ether = float(self.w3.from_wei(eth_amount_wei, 'ether'))  
+        estimated_usdc = eth_amount_ether * 4650  # Use pool ratio
+        min_usdc_out = int(estimated_usdc * 0.95 * 10**6)  # 5% slippage, 6 decimals
+        
+        print(f"📊 Estimated USDC out: {estimated_usdc:.4f}")
+        print(f"📊 Minimum USDC (5% slippage): {min_usdc_out / 10**6:.4f}")
+        
+        # Build swap
         builder = self.router_codec.encode.chain().v4_swap()
+        
+        # Double-check token ordering: ETH (0x000...) < USDC (0x833...)
+        # So ETH is token0, USDC is token1, zero_for_one = True ✓
         builder.swap_exact_in_single(
             pool_key=pool_key,
-            zero_for_one=True,
+            zero_for_one=True,  # ETH -> USDC
             amount_in=eth_amount_wei,
-            amount_out_min=int(eth_amount_wei * 0.95)  # 5% slippage tolerance (rough estimate)
+            amount_out_min=max(min_usdc_out, 100000)  # At least 0.1 USDC
         )
         builder.take_all(self.usdc_address, 0)
         
-        v4_swap = builder.build_v4_swap()
-        
         try:
+            v4_swap = builder.build_v4_swap()
             trx = v4_swap.build_transaction(
                 self.account.address,
                 eth_amount_wei,
                 ur_address=self.universal_router_address,
-                gas_limit=500000
+                gas_limit=600000  # Increase gas limit
             )
+            
+            # Simulate first
+            print("🔄 Simulating transaction...")
+            self.w3.eth.call(trx)
+            print("✅ Simulation passed!")
+            
+            # Send transaction
+            signed = self.w3.eth.account.sign_transaction(trx, self.account.key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            
+            print(f"📤 Transaction sent: {tx_hash.hex()}")
+            print("⏳ Waiting for confirmation...")
+            
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            
+            if receipt.status == 1:
+                print(f"✅ SUCCESS! Gas used: {receipt.gasUsed}")
+                return tx_hash
+            else:
+                print(f"❌ Transaction failed on-chain")
+                return None
+                
         except Exception as e:
-            print("❌ Error building transaction:", str(e))
-            traceback.print_exc()
-            raise
-
-        # Sign and broadcast
-        signed = self.w3.eth.account.sign_transaction(trx, self.account.key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        return tx_hash
+            print(f"❌ Error: {e}")
+            return None
 
     def swap_usdc_to_eth(self, usdc_amount):
         """
